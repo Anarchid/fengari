@@ -31,7 +31,25 @@ const lua     = require('./lua.js');
 const lauxlib = require('./lauxlib.js');
 const lualib  = require('./lualib.js');
 
+/* State persistence modules */
+const lserialize = require('./lserialize.js');
+const lsave      = require('./lsave.js');
+const lrestore   = require('./lrestore.js');
+
 module.exports.luaconf = luaconf;
 module.exports.lua     = lua;
 module.exports.lauxlib = lauxlib;
 module.exports.lualib  = lualib;
+
+/* State persistence API */
+module.exports.lserialize = lserialize;
+module.exports.lsave      = lsave;
+module.exports.lrestore   = lrestore;
+
+/* Convenience exports for state persistence */
+module.exports.saveVM               = lsave.saveVM;
+module.exports.restoreVM            = lrestore.restoreVM;
+module.exports.saveValue            = lsave.saveValue;
+module.exports.restoreValue         = lrestore.restoreValue;
+module.exports.NativeFunctionRegistry = lserialize.NativeFunctionRegistry;
+module.exports.SerializationError   = lserialize.SerializationError;
