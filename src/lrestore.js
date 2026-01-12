@@ -220,9 +220,18 @@ const RestoreTValue = function(R) {
             /* Placeholder for unserializable userdata */
             return new lobject.TValue(LUA_TNIL, null);
 
-        case SER_TFUNC_NULL:
-            /* Placeholder for unserializable function */
-            return new lobject.TValue(LUA_TNIL, null);
+        case SER_TFUNC_NULL: {
+            /*
+             * Placeholder for unserializable light C function.
+             * We create a CClosure that throws when called, rather than returning nil,
+             * because setting a table entry to nil would delete it.
+             */
+            const placeholderFunc = function() {
+                throw new Error('Attempted to call unrestored native function');
+            };
+            const cl = new lobject.CClosure(R.L, placeholderFunc, 0);
+            return new lobject.TValue(LUA_TCCL, cl);
+        }
 
         case SER_TPROTO:
             /* Proto shouldn't appear as a TValue directly */
@@ -371,6 +380,15 @@ const RestoreTable = function(R, t) {
         } else if (key.ttisnil()) {
             /* Actual nil key - skip (can't use nil as table key) */
             continue;
+        } else if (value.ttisnil() && value._isPlaceholder) {
+            /*
+             * Value is a forward reference placeholder - defer setting this entry.
+             * This happens when the value (e.g., a CClosure) hasn't been loaded yet.
+             * Setting a nil value would delete the entry!
+             */
+            R.fixups.push(() => {
+                ltable.luaH_setfrom(R.L, t, key, value);
+            });
         } else {
             ltable.luaH_setfrom(R.L, t, key, value);
         }

@@ -463,3 +463,155 @@ describe('Native Function Serialization', () => {
         expect(lua.lua_tointeger(L2, -1)).toBe(999);
     });
 });
+
+/* ============================================================
+ * Diagnostic Test for type/yield being nil
+ * ============================================================ */
+
+describe('Built-in function restoration diagnostic', () => {
+    test('type function should be placeholder (not nil) after restore without re-opening libs', () => {
+        /* Create a fresh VM with standard libraries */
+        const L1 = lauxlib.luaL_newstate();
+        lualib.luaL_openlibs(L1);
+
+        /* Verify type works in original */
+        lua.lua_getglobal(L1, to_luastring('type'));
+        console.log('Original type:', lua.lua_type(L1, -1), '(expected:', lua.LUA_TFUNCTION, ')');
+        expect(lua.lua_isfunction(L1, -1)).toBe(true);
+        lua.lua_pop(L1, 1);
+
+        /* Make a simple call to type */
+        lauxlib.luaL_dostring(L1, to_luastring('return type("test")'));
+        expect(lua.lua_tojsstring(L1, -1)).toBe('string');
+        lua.lua_pop(L1, 1);
+
+        /* Save the VM */
+        const snapshot = lsave.saveVM(L1, { onUnserializable: 'warn' });
+        console.log('Snapshot size:', snapshot.length, 'bytes');
+
+        /* Restore the VM WITHOUT re-opening libraries */
+        const L2 = lrestore.restoreVM(snapshot);
+
+        /* Check what type is in restored VM */
+        lua.lua_getglobal(L2, to_luastring('type'));
+        const typeType = lua.lua_type(L2, -1);
+        console.log('Restored type:', typeType);
+        console.log('  LUA_TNIL:', lua.LUA_TNIL);
+        console.log('  LUA_TFUNCTION:', lua.LUA_TFUNCTION);
+
+        if (typeType === lua.LUA_TNIL) {
+            console.log('BUG: type is nil instead of placeholder CClosure!');
+        } else if (typeType === lua.LUA_TFUNCTION) {
+            console.log('OK: type is a function (placeholder CClosure)');
+        }
+
+        /* The value should be a placeholder CClosure, NOT nil */
+        expect(lua.lua_isfunction(L2, -1)).toBe(true);
+        lua.lua_pop(L2, 1);
+    });
+
+    test('trace _G table contents during restore', () => {
+        const L1 = lauxlib.luaL_newstate();
+        lualib.luaL_openlibs(L1);
+
+        /* Collect original _G entries */
+        const origEntries = new Map();
+        lua.lua_getglobal(L1, to_luastring('_G'));
+        lua.lua_pushnil(L1);
+        while (lua.lua_next(L1, -2) !== 0) {
+            const keyType = lua.lua_type(L1, -2);
+            let keyName = '?';
+            if (keyType === lua.LUA_TSTRING) {
+                keyName = lua.lua_tojsstring(L1, -2);
+            }
+            const valType = lua.lua_type(L1, -1);
+            origEntries.set(keyName, valType);
+            lua.lua_pop(L1, 1);
+        }
+        lua.lua_pop(L1, 1);
+        console.log('Original _G entry count:', origEntries.size);
+
+        /* Save and restore */
+        const snapshot = lsave.saveVM(L1, { onUnserializable: 'warn' });
+        const L2 = lrestore.restoreVM(snapshot);
+
+        /* Collect restored _G entries */
+        const restoredEntries = new Map();
+        lua.lua_getglobal(L2, to_luastring('_G'));
+        lua.lua_pushnil(L2);
+        while (lua.lua_next(L2, -2) !== 0) {
+            const keyType = lua.lua_type(L2, -2);
+            let keyName = '?';
+            if (keyType === lua.LUA_TSTRING) {
+                keyName = lua.lua_tojsstring(L2, -2);
+            }
+            const valType = lua.lua_type(L2, -1);
+            restoredEntries.set(keyName, valType);
+            lua.lua_pop(L2, 1);
+        }
+        lua.lua_pop(L2, 1);
+        console.log('Restored _G entry count:', restoredEntries.size);
+
+        /* Find missing entries */
+        console.log('\nMISSING ENTRIES:');
+        for (const [key, valType] of origEntries) {
+            if (!restoredEntries.has(key)) {
+                console.log(`  ${key} (was type ${valType})`);
+            }
+        }
+
+        /* Find present entries */
+        console.log('\nPRESENT ENTRIES:');
+        for (const [key, valType] of restoredEntries) {
+            const origType = origEntries.get(key);
+            if (origType !== valType) {
+                console.log(`  ${key}: type changed from ${origType} to ${valType}`);
+            } else {
+                console.log(`  ${key}: OK (type ${valType})`);
+            }
+        }
+
+        /* Entry counts should match */
+        expect(restoredEntries.size).toBe(origEntries.size);
+    });
+
+    test('re-opening base library after restore requires clearing package.loaded', () => {
+        const L1 = lauxlib.luaL_newstate();
+        lualib.luaL_openlibs(L1);
+
+        /* Verify type works in original */
+        lauxlib.luaL_dostring(L1, to_luastring('return type("test")'));
+        expect(lua.lua_tojsstring(L1, -1)).toBe('string');
+        lua.lua_pop(L1, 1);
+
+        /* Save and restore */
+        const snapshot = lsave.saveVM(L1, { onUnserializable: 'warn' });
+        const L2 = lrestore.restoreVM(snapshot);
+
+        /* Before re-opening libs, type should be a placeholder function */
+        lua.lua_getglobal(L2, to_luastring('type'));
+        expect(lua.lua_isfunction(L2, -1)).toBe(true);
+        lua.lua_pop(L2, 1);
+
+        /*
+         * IMPORTANT: luaL_requiref checks package.loaded first and won't
+         * re-run the opener if the module is already cached. Since the
+         * restored VM has package.loaded populated from the original,
+         * we must clear the entries before calling luaL_requiref.
+         */
+        lua.lua_getglobal(L2, to_luastring('package'));
+        lua.lua_getfield(L2, -1, to_luastring('loaded'));
+        lua.lua_pushnil(L2);
+        lua.lua_setfield(L2, -2, to_luastring('_G'));
+        lua.lua_pop(L2, 2);
+
+        /* Now re-open the base library */
+        lauxlib.luaL_requiref(L2, to_luastring('_G'), lualib.luaopen_base, 1);
+        lua.lua_pop(L2, 1);
+
+        /* Now type should be callable */
+        const result = lauxlib.luaL_dostring(L2, to_luastring('return type("test")'));
+        expect(result).toBe(lua.LUA_OK);
+        expect(lua.lua_tojsstring(L2, -1)).toBe('string');
+    });
+});
