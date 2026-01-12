@@ -61,6 +61,32 @@ const lstring = require('./lstring.js');
 const lfunc = require('./lfunc.js');
 const lstate = require('./lstate.js');
 
+/* Imports for library re-injection (openLibs option) */
+const {
+    lua_pushcfunction,
+    lua_pushliteral,
+    lua_call,
+    lua_setglobal,
+    lua_pop
+} = require('./lua.js');
+
+const { luaopen_base }      = require('./lbaselib.js');
+const { luaopen_coroutine } = require('./lcorolib.js');
+const { luaopen_table }     = require('./ltablib.js');
+const { luaopen_string }    = require('./lstrlib.js');
+const { luaopen_math }      = require('./lmathlib.js');
+const { luaopen_utf8 }      = require('./lutf8lib.js');
+const { luaopen_os }        = require('./loslib.js');
+const { luaopen_debug }     = require('./ldblib.js');
+const { luaopen_package }   = require('./loadlib.js');
+const { luaopen_fengari }   = require('./fengarilib.js');
+
+/* io library is only available in Node.js environment */
+let luaopen_io = null;
+if (typeof process !== "undefined") {
+    luaopen_io = require('./liolib.js').luaopen_io;
+}
+
 /* ============================================================
  * Binary Reading Utilities
  * ============================================================ */
@@ -784,6 +810,71 @@ const RestoreGlobalState = function(R, g) {
 };
 
 /* ============================================================
+ * Library Re-injection (for openLibs option)
+ * ============================================================ */
+
+/**
+ * All standard Lua/Fengari libraries.
+ * Maps global name to opener function.
+ */
+const ALL_LIBS = {
+    '_G':        luaopen_base,
+    'package':   luaopen_package,
+    'coroutine': luaopen_coroutine,
+    'table':     luaopen_table,
+    'os':        luaopen_os,
+    'string':    luaopen_string,
+    'math':      luaopen_math,
+    'utf8':      luaopen_utf8,
+    'debug':     luaopen_debug,
+    'fengari':   luaopen_fengari
+};
+
+/* Add io library if available (Node.js only) */
+if (luaopen_io !== null) {
+    ALL_LIBS['io'] = luaopen_io;
+}
+
+/**
+ * Inject a library directly into the global table.
+ * This bypasses luaL_requiref's package.loaded cache check,
+ * which is necessary after VM restoration since the cache
+ * contains references to unserializable functions.
+ *
+ * @param {lua_State} L - The Lua state
+ * @param {string} name - Global name for the library (JS string)
+ * @param {function} openf - The luaopen_* function
+ */
+const injectLib = function(L, name, openf) {
+    lua_pushcfunction(L, openf);
+    lua_pushliteral(L, name);
+    lua_call(L, 1, 1);                     /* call openf(name), returns lib table */
+    lua_setglobal(L, to_luastring(name));  /* _G[name] = lib */
+};
+
+/**
+ * Re-inject standard libraries after VM restoration.
+ * This overwrites placeholder functions with working implementations.
+ *
+ * @param {lua_State} L - The restored Lua state
+ * @param {boolean|string[]} libs - Which libraries to inject:
+ *        - true: all standard libraries
+ *        - string[]: only specified libs (e.g., ['coroutine', 'string'])
+ */
+const reinjectLibraries = function(L, libs) {
+    const libsToOpen = (libs === true)
+        ? Object.keys(ALL_LIBS)
+        : libs;
+
+    for (const name of libsToOpen) {
+        const openf = ALL_LIBS[name];
+        if (openf) {
+            injectLib(L, name, openf);
+        }
+    }
+};
+
+/* ============================================================
  * Full VM Restoration
  * ============================================================ */
 
@@ -791,6 +882,10 @@ const RestoreGlobalState = function(R, g) {
  * Restore an entire VM state from serialized data
  * @param {Uint8Array} buffer - The serialized state data
  * @param {Object} options - Restoration options
+ * @param {boolean|string[]} [options.openLibs] - Re-inject standard libraries after restore.
+ *        - true: inject all standard libs (_G, package, coroutine, table, os, string, math, utf8, debug, io, fengari)
+ *        - string[]: inject only specified libs (e.g., ['coroutine', 'string'])
+ *        - false/undefined: don't inject (native functions remain as throwing placeholders)
  * @returns {lua_State} - The restored Lua state
  */
 const restoreVM = function(buffer, options = {}) {
@@ -829,6 +924,11 @@ const restoreVM = function(buffer, options = {}) {
 
     /* Run fixups */
     R.runFixups();
+
+    /* Re-inject standard libraries if requested */
+    if (options.openLibs) {
+        reinjectLibraries(L, options.openLibs);
+    }
 
     return L;
 };
@@ -899,3 +999,7 @@ module.exports.ReadUInt32 = ReadUInt32;
 module.exports.ReadFloat64 = ReadFloat64;
 module.exports.ReadString = ReadString;
 module.exports.ReadRef = ReadRef;
+
+/* Export library re-injection utilities */
+module.exports.reinjectLibraries = reinjectLibraries;
+module.exports.ALL_LIBS = ALL_LIBS;

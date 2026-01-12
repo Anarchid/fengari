@@ -614,4 +614,106 @@ describe('Built-in function restoration diagnostic', () => {
         expect(result).toBe(lua.LUA_OK);
         expect(lua.lua_tojsstring(L2, -1)).toBe('string');
     });
+
+    test('openLibs option re-injects all standard libraries automatically', () => {
+        const L1 = lauxlib.luaL_newstate();
+        lualib.luaL_openlibs(L1);
+
+        /* Verify various stdlib functions work in original */
+        let result = lauxlib.luaL_dostring(L1, to_luastring('return type("test")'));
+        expect(result).toBe(lua.LUA_OK);
+        expect(lua.lua_tojsstring(L1, -1)).toBe('string');
+        lua.lua_pop(L1, 1);
+
+        result = lauxlib.luaL_dostring(L1, to_luastring('return math.abs(-5)'));
+        expect(result).toBe(lua.LUA_OK);
+        expect(lua.lua_tonumber(L1, -1)).toBe(5);
+        lua.lua_pop(L1, 1);
+
+        result = lauxlib.luaL_dostring(L1, to_luastring('return string.upper("hello")'));
+        expect(result).toBe(lua.LUA_OK);
+        expect(lua.lua_tojsstring(L1, -1)).toBe('HELLO');
+        lua.lua_pop(L1, 1);
+
+        /* Save and restore WITH openLibs: true */
+        const snapshot = lsave.saveVM(L1, { onUnserializable: 'warn' });
+        const L2 = lrestore.restoreVM(snapshot, { openLibs: true });
+
+        /* All stdlib functions should work immediately */
+        result = lauxlib.luaL_dostring(L2, to_luastring('return type("test")'));
+        expect(result).toBe(lua.LUA_OK);
+        expect(lua.lua_tojsstring(L2, -1)).toBe('string');
+        lua.lua_pop(L2, 1);
+
+        result = lauxlib.luaL_dostring(L2, to_luastring('return math.abs(-5)'));
+        expect(result).toBe(lua.LUA_OK);
+        expect(lua.lua_tonumber(L2, -1)).toBe(5);
+        lua.lua_pop(L2, 1);
+
+        result = lauxlib.luaL_dostring(L2, to_luastring('return string.upper("hello")'));
+        expect(result).toBe(lua.LUA_OK);
+        expect(lua.lua_tojsstring(L2, -1)).toBe('HELLO');
+        lua.lua_pop(L2, 1);
+
+        /* coroutine.yield should also work */
+        result = lauxlib.luaL_dostring(L2, to_luastring('return coroutine.yield ~= nil'));
+        expect(result).toBe(lua.LUA_OK);
+        expect(lua.lua_toboolean(L2, -1)).toBe(true);
+        lua.lua_pop(L2, 1);
+    });
+
+    test('openLibs with selective library list', () => {
+        const L1 = lauxlib.luaL_newstate();
+        lualib.luaL_openlibs(L1);
+
+        /* Save and restore with only coroutine and string libs */
+        const snapshot = lsave.saveVM(L1, { onUnserializable: 'warn' });
+        const L2 = lrestore.restoreVM(snapshot, { openLibs: ['coroutine', 'string'] });
+
+        /* coroutine.yield should work */
+        let result = lauxlib.luaL_dostring(L2, to_luastring('return coroutine.yield ~= nil'));
+        expect(result).toBe(lua.LUA_OK);
+        expect(lua.lua_toboolean(L2, -1)).toBe(true);
+        lua.lua_pop(L2, 1);
+
+        /* string.upper should work */
+        result = lauxlib.luaL_dostring(L2, to_luastring('return string.upper("hello")'));
+        expect(result).toBe(lua.LUA_OK);
+        expect(lua.lua_tojsstring(L2, -1)).toBe('HELLO');
+        lua.lua_pop(L2, 1);
+
+        /* math.abs should still be a placeholder (throws on call) */
+        lua.lua_getglobal(L2, to_luastring('math'));
+        lua.lua_getfield(L2, -1, to_luastring('abs'));
+        expect(lua.lua_isfunction(L2, -1)).toBe(true); /* It's a placeholder function */
+        lua.lua_pop(L2, 2);
+    });
+
+    test('user-defined Lua functions work after restore with openLibs', () => {
+        const L1 = lauxlib.luaL_newstate();
+        lualib.luaL_openlibs(L1);
+
+        /* Define a function that uses stdlib */
+        let result = lauxlib.luaL_dostring(L1, to_luastring(`
+            function greet(name)
+                return string.upper("hello " .. name)
+            end
+        `));
+        expect(result).toBe(lua.LUA_OK);
+
+        /* Test it works */
+        result = lauxlib.luaL_dostring(L1, to_luastring('return greet("world")'));
+        expect(result).toBe(lua.LUA_OK);
+        expect(lua.lua_tojsstring(L1, -1)).toBe('HELLO WORLD');
+        lua.lua_pop(L1, 1);
+
+        /* Save and restore with openLibs */
+        const snapshot = lsave.saveVM(L1, { onUnserializable: 'warn' });
+        const L2 = lrestore.restoreVM(snapshot, { openLibs: true });
+
+        /* User function should still work, using re-injected stdlib */
+        result = lauxlib.luaL_dostring(L2, to_luastring('return greet("restored")'));
+        expect(result).toBe(lua.LUA_OK);
+        expect(lua.lua_tojsstring(L2, -1)).toBe('HELLO RESTORED');
+    });
 });
